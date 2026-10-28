@@ -74,7 +74,7 @@ resurrect: cybercrime.gov/
   asset  2001-06-04  http://cybercrime.gov/unlawful.pdf
   asset  2001-06-04  http://cybercrime.gov/append.pdf
   asset  2000-08-18  http://www.cybercrime.gov/agletter.pdf
-  asset  2024-08-26  http://www.cybercrime.gov/searchmanual.zip [nearest, 8457d from target]
+  lost   http://www.cybercrime.gov/searchmanual.zip
   asset  2001-06-16  http://www.cybercrime.gov/searchmanual.pdf
   asset  2004-04-15  http://www.cybercrime.gov/ebaypleaagree.pdf
   asset  2001-06-06  http://cybercrime.gov/ipmanual/IPmanual.exe
@@ -82,7 +82,7 @@ resurrect: cybercrime.gov/
 
 Resurrected cybercrime.gov/ as of 2001-07-01
   pages:  60 recovered, 0 lost
-  assets: 17 recovered, 1 lost
-  84 requests to archive.org, 0 from cache, 170s
+  assets: 16 recovered, 2 lost
+  0 requests to archive.org, 79 from cache, 1s
   -> demo\sites\cybercrime.gov\index.html
   -> demo\sites\cybercrime.gov\_resurrect\REPORT.md
