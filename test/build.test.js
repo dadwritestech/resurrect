@@ -147,3 +147,55 @@ test('fetcher backs off on 429 and retries', async () => {
   assert.equal(r.body.toString(), 'ok');
   assert.equal(f.stats.retries, 1);
 });
+
+test('when the start URL was never captured, the crawl enters via the shallowest archived page', async () => {
+  const out = await mkdtemp(join(tmpdir(), 'resurrect-'));
+  const rows = [
+    ['urlkey', 'timestamp', 'original', 'mimetype', 'statuscode', 'digest', 'length'],
+    ['gov,old)/kids/html/home.html', '20010101000000', 'http://old.gov:80/kids/html/home.html', 'text/html', '200', 'A', '50'],
+    ['gov,old)/kids/html/deep/pets.html', '20010101000000', 'http://old.gov:80/kids/html/deep/pets.html', 'text/html', '200', 'B', '50'],
+  ];
+  const pages = {
+    'http://old.gov:80/kids/html/home.html': '<a href="deep/pets.html">pets</a>',
+    'http://old.gov:80/kids/html/deep/pets.html': '<a href="../home.html">home</a>',
+  };
+  const fetchImpl = async (u) => {
+    if (u.includes('/cdx/')) return new Response(JSON.stringify(rows), { headers: { 'content-type': 'application/json' } });
+    const orig = u.replace(/^https:\/\/web\.archive\.org\/web\/\d+id_\//, '');
+    return pages[orig] ? new Response(pages[orig], { headers: { 'content-type': 'text/html' } }) : new Response(null, { status: 404 });
+  };
+  try {
+    const report = await resurrect({ url: 'http://old.gov/kids/', year: 2001, out, fetcher: createFetcher({ delayMs: 0, fetchImpl }) });
+    assert.equal(report.pages.recovered.length, 2);
+    assert.match(await readFile(join(out, 'index.html'), 'utf8'), /url=html\/index\.html/); // home.html is canonicalised as a directory index
+  } finally {
+    await rm(out, { recursive: true, force: true });
+  }
+});
+
+test('a "nearest" capture decades away, or HTML served for a .zip, counts as lost', async () => {
+  const out = await mkdtemp(join(tmpdir(), 'resurrect-'));
+  const rows = [
+    ['urlkey', 'timestamp', 'original', 'mimetype', 'statuscode', 'digest', 'length'],
+    ['gov,old)/', '20010101000000', 'http://old.gov:80/', 'text/html', '200', 'A', '50'],
+    ['gov,old)/manual.zip', '20010101000000', 'http://old.gov:80/manual.zip', 'application/zip', '200', 'B', '50'],
+  ];
+  const fetchImpl = async (u) => {
+    if (u.includes('/cdx/')) return new Response(JSON.stringify(rows), { headers: { 'content-type': 'application/json' } });
+    if (u.endsWith('id_/http://old.gov:80/')) return new Response('<a href="manual.zip">zip</a><img src="logo.gif">', { headers: { 'content-type': 'text/html' } });
+    // the indexed zip capture is really a soft-404 HTML page
+    if (u.endsWith('id_/http://old.gov:80/manual.zip')) return new Response('<!DOCTYPE html><html>moved</html>', { headers: { 'content-type': 'text/html' } });
+    // logo.gif is not indexed; the archive's nearest copy is from 2024
+    if (u.includes('20010101000000id_/http://old.gov/logo.gif')) return new Response(null, { status: 302, headers: { location: '/web/20240101000000id_/http://old.gov/logo.gif' } });
+    if (u.includes('20240101000000id_/http://old.gov/logo.gif')) return new Response(fixture('pixel.gif'), { headers: { 'content-type': 'image/gif' } });
+    return new Response(null, { status: 404 });
+  };
+  try {
+    const report = await resurrect({ url: 'old.gov', year: 2001, out, fetcher: createFetcher({ delayMs: 0, fetchImpl }) });
+    assert.deepEqual(report.assets.recovered, []);
+    assert.deepEqual(report.assets.lost.map((a) => a.url).sort(), ['http://old.gov/logo.gif', 'http://old.gov/manual.zip']);
+    assert.ok(!existsSync(join(out, 'manual.zip')));
+  } finally {
+    await rm(out, { recursive: true, force: true });
+  }
+});

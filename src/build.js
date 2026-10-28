@@ -28,6 +28,13 @@ function classify(res, url) {
   return { isHtml, isCss };
 }
 
+const MAX_NEAREST_DAYS = 3 * 365;
+
+/** A .zip/.gif/.pdf URL answered with an HTML page is an error page or a later site, not the file. */
+function plausible(res, url) {
+  return !(looksLikeAsset(url) && !/\.css$/i.test(url.pathname) && classify(res, url).isHtml);
+}
+
 const days = (a, b) => Math.round(Math.abs(tsToMs(a) - tsToMs(b)) / 86_400_000);
 
 /**
@@ -77,7 +84,7 @@ export async function resurrect({
     for (let i = 0; i < ranked.length; i++) {
       const c = ranked[i];
       const got = await fetcher.get(waybackRawUrl(c.ts, c.original));
-      if (got.status === 200 && got.body.length) {
+      if (got.status === 200 && got.body.length && plausible(got, r.url)) {
         const w = unwrapWayback(new URL(got.finalUrl).pathname);
         return { got, ts: w?.ts?.padEnd(14, '0') || c.ts, original: c.original, via: i === 0 ? 'best' : 'neighbour' };
       }
@@ -85,14 +92,29 @@ export async function resurrect({
     // Not in our index (other host, or a URL variant the crawler saw): let
     // the Wayback Machine redirect us to its nearest capture of it.
     const got = await fetcher.get(waybackRawUrl(target, r.url.href));
-    if (got.status === 200 && got.body.length) {
+    if (got.status === 200 && got.body.length && plausible(got, r.url)) {
       const w = unwrapWayback(new URL(got.finalUrl).pathname);
-      return { got, ts: w?.ts?.padEnd(14, '0') || target, original: w?.url || r.url.href, via: 'nearest' };
+      const ts = w?.ts?.padEnd(14, '0') || target;
+      // "nearest" can be decades away (a later owner, a parked domain): too far is lost, not recovered
+      if (days(ts, target) <= MAX_NEAREST_DAYS) return { got, ts, original: w?.url || r.url.href, via: 'nearest' };
     }
     return null;
   }
 
   enqueue(new URL(scope.start), 'nav', null);
+  // The start URL itself is often a redirect (not a 200 capture). Seed the
+  // shallowest archived HTML page too, so the crawl has a real entry point.
+  let entryKey = urlKey(new URL(scope.start));
+  if (!index.has(entryKey)) {
+    const alt = [...index.entries()]
+      .filter(([, caps]) => caps.some((c) => /html/.test(c.mime || '')))
+      .sort(([a], [b]) => a.split('/').length - b.split('/').length || a.length - b.length)[0];
+    if (alt) {
+      log(`  start page not archived; entering via ${alt[1][0].original}`);
+      entryKey = alt[0];
+      enqueue(new URL(alt[1][0].original), 'nav', null);
+    }
+  }
 
   while (queue.length) {
     const r = queue.shift();
@@ -168,7 +190,8 @@ export async function resurrect({
     return undefined;
   }
 
-  const start = res.get(urlKey(new URL(scope.start)));
+  const asked = res.get(urlKey(new URL(scope.start)));
+  const start = asked?.status === 'ok' ? asked : res.get(entryKey);
   if (start?.status === 'ok' && start.local !== 'index.html' && !used.has('index.html')) {
     await write('index.html', `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${start.local}"><a href="${start.local}">${start.local}</a>\n`);
   }
