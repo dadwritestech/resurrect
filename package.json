@@ -1,0 +1,11 @@
+{
+  "name": "resurrect",
+  "version": "0.1.0",
+  "description": "Give it a dead website URL, get the website back: a clean, working static site rebuilt from the Wayback Machine.",
+  "type": "module",
+  "bin": { "resurrect": "bin/resurrect.js" },
+  "scripts": { "test": "node --test \"test/*.test.js\"" },
+  "engines": { "node": ">=20" },
+  "license": "MIT",
+  "files": ["bin", "src", "README.md", "LICENSE"]
+}
