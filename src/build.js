@@ -69,7 +69,8 @@ export async function resurrect({
     let r = res.get(key);
     if (!r) {
       const own = inScope(u, scope);
-      if (kind === 'nav' && !own) { externalNav++; return; }
+      // a link that opens a file (the full-size photo, the PDF) is an asset, even outside the prefix
+      if (kind === 'nav' && !own && !looksLikeAsset(u)) { externalNav++; return; }
       if (!own && !external) return;
       const want = kind === 'nav' && !looksLikeAsset(u) ? 'page' : 'asset';
       r = { key, url: u, want, own, status: 'queued', referrers: new Set() };
@@ -186,8 +187,8 @@ export async function resurrect({
       // out of scope, or beyond --max-pages: send the reader to the archive's copy
       return waybackViewUrl(from.ts, l.url.href);
     }
-    if (t?.status === 'skipped' || t?.status === 'lost') return waybackViewUrl(`${from.ts}im_`, l.url.href);
-    return undefined;
+    // never leave a link as it was: relative to the dead site, it would break here
+    return waybackViewUrl(`${from.ts}im_`, l.url.href);
   }
 
   const asked = res.get(urlKey(new URL(scope.start)));

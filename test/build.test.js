@@ -156,18 +156,25 @@ test('when the start URL was never captured, the crawl enters via the shallowest
     ['gov,old)/kids/html/deep/pets.html', '20010101000000', 'http://old.gov:80/kids/html/deep/pets.html', 'text/html', '200', 'B', '50'],
   ];
   const pages = {
-    'http://old.gov:80/kids/html/home.html': '<a href="deep/pets.html">pets</a>',
+    'http://old.gov:80/kids/html/home.html': '<a href="deep/pets.html">pets</a> <a href="/media/big.jpg">photo</a> <a href="/media/gone.jpg">gone</a>',
+    'http://old.gov/media/big.jpg': 'JPEGDATA',
     'http://old.gov:80/kids/html/deep/pets.html': '<a href="../home.html">home</a>',
   };
   const fetchImpl = async (u) => {
     if (u.includes('/cdx/')) return new Response(JSON.stringify(rows), { headers: { 'content-type': 'application/json' } });
     const orig = u.replace(/^https:\/\/web\.archive\.org\/web\/\d+id_\//, '');
-    return pages[orig] ? new Response(pages[orig], { headers: { 'content-type': 'text/html' } }) : new Response(null, { status: 404 });
+    const type = orig.endsWith('.jpg') ? 'image/jpeg' : 'text/html';
+    return pages[orig] ? new Response(pages[orig], { headers: { 'content-type': type } }) : new Response(null, { status: 404 });
   };
   try {
     const report = await resurrect({ url: 'http://old.gov/kids/', year: 2001, out, fetcher: createFetcher({ delayMs: 0, fetchImpl }) });
     assert.equal(report.pages.recovered.length, 2);
     assert.match(await readFile(join(out, 'index.html'), 'utf8'), /url=html\/index\.html/); // home.html is canonicalised as a directory index
+    // a link out of the /kids/ prefix that opens a photo is fetched as an asset;
+    // one that can't be recovered goes to the archive, never stays a dead-site path
+    const home = await readFile(join(out, 'html', 'index.html'), 'utf8');
+    assert.match(home, /href="\.\.\/_ext\/old\.gov\/media\/big\.jpg">photo/);
+    assert.match(home, /href="https:\/\/web\.archive\.org\/web\/20010101000000im_\/http:\/\/old\.gov\/media\/gone\.jpg">gone/);
   } finally {
     await rm(out, { recursive: true, force: true });
   }
