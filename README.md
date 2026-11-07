@@ -3,8 +3,8 @@
 **Give it a dead website. Get the website back, working.**
 
 ```bash
-npx resurrect y2k.gov
-npx resurrect myoldblog.com --year 2006
+npx github:dadwritestech/resurrect y2k.gov
+npx github:dadwritestech/resurrect myoldblog.com --year 2006
 ```
 
 resurrect asks the Internet Archive's Wayback Machine what it holds for a site. It picks the best
@@ -12,7 +12,7 @@ snapshot of every page for one moment in time and rebuilds the site as a plain s
 pages keep their original look and their links work. You can open the folder locally, zip it, or
 host it anywhere.
 
-| before (today) | after (`npx resurrect y2k.gov`) |
+| before (today) | after (`npx github:dadwritestech/resurrect y2k.gov`) |
 |---|---|
 | ![y2k.gov no longer resolves](docs/screenshots/y2k.gov-before.png) | ![y2k.gov rebuilt as of May 2000](docs/screenshots/y2k.gov-after.png) |
 | ![cybercrime.gov now redirects to justice.gov](docs/screenshots/cybercrime.gov-before.png) | ![cybercrime.gov rebuilt as of 2001](docs/screenshots/cybercrime.gov-after.png) |
