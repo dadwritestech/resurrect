@@ -7,8 +7,9 @@ npx github:dadwritestech/resurrect y2k.gov
 npx github:dadwritestech/resurrect myoldblog.com --year 2006
 ```
 
-resurrect asks the Internet Archive's Wayback Machine what it holds for a site. It picks the best
-snapshot of every page for one moment in time and rebuilds the site as a plain static folder. The
+resurrect asks web archives what they hold for a site: the Internet Archive's Wayback Machine,
+plus [Arquivo.pt](https://arquivo.pt) and any other pywb archive you point it at. It picks the
+best snapshot of every page for one moment in time and rebuilds the site as a plain static folder. The
 pages keep their original look and their links work. You can open the folder locally, zip it, or
 host it anywhere.
 
@@ -37,8 +38,42 @@ site**:
   and inline `style=` and CSS `url()`. Bytes are preserved, so ISO-8859-1 pages stay ISO-8859-1.
   Scripts are left untouched.
 - **A report.** `_resurrect/REPORT.md` lists what was recovered and what was lost. It also lists
-  which pages were filled from a neighbouring snapshot, and how many days that snapshot is from
-  the target.
+  which pages were filled from a neighbouring snapshot, how many days that snapshot is from the
+  target, and which archive it came from.
+- **More than one archive.** It doesn't rely on the Wayback Machine alone (see below).
+
+## What if the Wayback Machine loses it, or goes down?
+
+It happens. Sites get excluded on request, captures go missing, and archive.org has been offline
+for days before. So resurrect asks more than one archive and uses whichever capture is closest
+to the target moment, page by page:
+
+- **By default it asks the Wayback Machine and Arquivo.pt** (the Portuguese web archive, which
+  has crawled the wider web since 1996 and runs the same CDX/replay interface).
+- **If an archive is down, the run carries on without it.** If an index query fails, that archive
+  is dropped for the run. If page fetches keep failing (3 network errors or 5xx in a row), the
+  archive is skipped from then on, so you don't wait through retries for every remaining URL.
+- **If the closest capture is broken in one archive,** the next-closest capture from any archive
+  fills the gap.
+- **Any pywb archive works,** including one you run yourself. If you keep WARC files of your own
+  site (from `wget --warc-file`, Browsertrix, ArchiveWeb.page...), serve them with
+  [pywb](https://github.com/webrecorder/pywb) and rebuild from your own copy, with no third party
+  involved:
+
+```bash
+resurrect myoldblog.com --archive arquivo                      # the Wayback Machine is unavailable
+resurrect myoldblog.com --archive http://localhost:8080/mine/  # only your own pywb collection
+resurrect myoldblog.com --archive wayback --archive https://example.org/wayback/
+```
+
+Each page's footer and the report credit the archive the page actually came from.
+
+Limits, measured 2026-11-07: Arquivo.pt is much thinner than the Wayback Machine outside
+Portugal. It had 0 captures of y2k.gov. For expo98.pt in 1998 (`--archive arquivo`, Wayback not
+used) it gave back 25 pages with 0 broken local links, but only 1 of 91 images. The Memento
+aggregator (timetravel.mementoweb.org) no longer resolves. archive.today has no raw-capture mode
+and blocks bots, and several national archives sit behind bot checks, so none of these are built
+in.
 
 ## Use it for your own sites
 
@@ -46,16 +81,16 @@ resurrect is meant for **your own old sites and personal archival use**: your ba
 your first blog, a project's lost docs. The content belongs to whoever wrote it, and the copy
 comes from the Internet Archive. So by default:
 
-- every page gets a small footer: *Resurrected from the Internet Archive's Wayback Machine ·
-  captured 2000-05-08*
+- every page gets a small footer naming its source: *Resurrected from the Internet Archive's
+  Wayback Machine · captured 2000-05-08*
 - every page gets `<meta name="robots" content="noindex,nofollow">` and the folder gets a
   `robots.txt` that disallows crawling. `--allow-indexing` turns both off; use it only for a site
   you own.
 
-It is also polite to archive.org. It sends one request at a time, waits 1 second between
+It is also polite to the archives. It sends one request at a time, waits 1 second between
 requests (`--delay`), and uses a clear User-Agent. It backs off on 429/5xx and honours
 `Retry-After`. It caches every response on disk, so a second run costs zero requests. It never
-contacts the dead domain itself: redirects that would leave archive.org are refused.
+contacts the dead domain itself: redirects that would leave the archive are refused.
 
 ## Options
 
@@ -66,7 +101,9 @@ resurrect <url> [--year 2009] [options]
   --out <dir>          output folder (default: ./resurrected/<host>)
   --max-pages <n>      stop after n pages (default 300)
   --max-assets <n>     stop after n images/styles/files (default 3000)
-  --delay <ms>         gap between requests to archive.org (default 1000)
+  --archive <name|url> where to look; repeat for several (default: wayback + arquivo)
+                       names: wayback, arquivo; or any pywb collection URL
+  --delay <ms>         gap between requests to an archive (default 1000)
   --cache <dir>        download cache (default ~/.cache/resurrect)
   --no-external        don't fetch images/CSS hosted on other domains
   --allow-indexing     omit noindex + robots.txt (only for sites you own)
@@ -77,19 +114,20 @@ Zero dependencies; Node 20 or later.
 
 ## How it works
 
-1. **Index.** The CDX API lists every successful capture under the URL. The query is paged and
-   deduplicated by content digest, and `--year` limits it to ±5 years.
+1. **Index.** Each archive's CDX API lists every successful capture under the URL. The query is
+   deduplicated by content digest, and `--year` limits it to ±5 years. Captures from all archives
+   go into one index, each tagged with its archive.
 2. **Pick the moment.** This is `--year` (1 July of that year) or the busiest year by distinct
    URLs, centred on that year's median capture.
 3. **Crawl from the start page.** For each page or asset found, it ranks that URL's captures by
-   distance from the moment and fetches the raw bytes (`id_`), trying up to 4 captures. If the
-   URL isn't in the index, it asks the Wayback Machine for its nearest copy. A copy more than
+   distance from the moment and fetches the raw bytes (`id_`), trying up to 4 captures per
+   archive. If the URL isn't in the index, it asks each archive in turn for its nearest copy. A copy more than
    3 years away counts as lost. So does an HTML error page served in place of a `.zip` or `.gif`.
    If the start URL itself was only ever a redirect, the crawl enters via the shallowest archived
    page.
 4. **Rewrite and write.** URLs are canonicalised: case, `www.`, `index.html`/`default.htm`, and
    query strings hashed into filenames. Each link is then rewritten to a relative local path, the
-   lost-page placeholder, or a Wayback URL. The tool then writes the footer, the noindex tag and
+   lost-page placeholder, or the archive's own copy. The tool then writes the footer, the noindex tag and
    the report.
 
 ## Demos (real runs, 2026-10-28)
@@ -134,14 +172,15 @@ What was lost, and why:
 ## Development
 
 ```bash
-npm test                                 # 27 tests, offline, recorded fixtures
+npm test                                 # 34 tests, offline, recorded fixtures
 node scripts/verify.js <out-dir> <host>  # check every local link in a rebuilt site
 ```
 
 Tests cover snapshot selection against a recorded y2k.gov CDX index, link rewriting on 1990s
 markup and a recorded y2k.gov page, and an end-to-end build against a fake archive. The
 end-to-end tests check neighbour fill, lost pages, the "nearest" fallback and its guards, the
-cache, offsite-redirect refusal and 429 back-off.
+cache, offsite-redirect refusal and 429 back-off. Archive tests rebuild a site with the Wayback
+Machine down, fall back after repeated 5xx errors, and run against a self-hosted pywb only.
 
 See [COMPETITION.md](COMPETITION.md) for how this differs from wayback-machine-downloader,
 waybackpack and wayback-restorer.
@@ -149,4 +188,5 @@ waybackpack and wayback-restorer.
 ## License
 
 MIT. Content you rebuild belongs to its original authors; the copies come from the
-[Internet Archive](https://archive.org/donate). Please consider donating.
+[Internet Archive](https://archive.org/donate) and the other archives you use. Please consider
+donating.

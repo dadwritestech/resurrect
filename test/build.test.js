@@ -93,7 +93,8 @@ test('resurrects a small site end to end: neighbour fill, lost pages, external a
     assert.equal(await readFile(join(out, 'robots.txt'), 'utf8'), 'User-agent: *\nDisallow: /\n');
 
     // politeness: the dead live site is never contacted, only archive.org
-    assert.ok(calls.every((u) => u.startsWith('https://web.archive.org/')));
+    assert.ok(calls.every((u) => u.startsWith('https://web.archive.org/') || u.startsWith('https://arquivo.pt/')));
+    assert.ok(!calls.some((u) => /^https?:\/\/(www\.)?oldsite\.com/.test(u)));
     // each URL fetched once (in-run de-duplication)
     assert.equal(new Set(calls).size, calls.length);
   } finally {

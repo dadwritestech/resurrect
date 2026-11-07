@@ -2,19 +2,21 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { ARCHIVES, pickArchives, rawUrl, unwrapReplay, viewUrl } from './archives.js';
 import {
-  buildIndex, fetchCdx, rankCaptures, targetTimestamp, tsToDate, tsToMs, waybackRawUrl, waybackViewUrl,
+  buildIndex, fetchAllCdx, rankCaptures, targetTimestamp, tsToDate, tsToMs,
 } from './cdx.js';
 import {
   asciiHtml, extractCssLinks, extractLinks, injectBeforeBodyEnd, injectInHead, isFrameset,
   transformCss, transformHtml,
 } from './rewrite.js';
 import {
-  inScope, localPath, looksLikeAsset, makeScope, relativeHref, unwrapWayback, urlKey, withScheme,
+  inScope, localPath, looksLikeAsset, makeScope, relativeHref, urlKey, withScheme,
 } from './urls.js';
 import { lostPage, renderReport } from './report.js';
 
-const MAX_TRIES = 4; // best capture + up to 3 neighbours
+const MAX_TRIES = 4; // per archive: best capture + up to 3 neighbours
+const DOWN_AFTER = 3; // consecutive network/5xx failures before an archive is skipped for the rest of the run
 
 function sniffHtml(buf) {
   const head = buf.subarray(0, 1024).toString('latin1').toLowerCase();
@@ -47,12 +49,17 @@ const days = (a, b) => Math.round(Math.abs(tsToMs(a) - tsToMs(b)) / 86_400_000);
  */
 export async function resurrect({
   url, year, out, fetcher, log = () => {}, maxPages = 300, maxAssets = 3000,
-  external = true, noindex = true,
+  external = true, noindex = true, archives: archiveList,
 }) {
   const scope = makeScope(withScheme(url));
-  log(`resurrect: ${scope.host}${scope.prefix}/`);
-  const { rows, truncated } = await fetchCdx(scope, fetcher, { log, year });
-  if (!rows.length) throw new Error(`The Wayback Machine has no successful captures under ${scope.cdxUrl}`);
+  const archives = pickArchives(archiveList);
+  const byName = new Map(archives.map((a) => [a.name, a]));
+  log(`resurrect: ${scope.host}${scope.prefix}/  (archives: ${archives.map((a) => a.name).join(', ')})`);
+  const { rows, truncated, sources } = await fetchAllCdx(scope, fetcher, archives, { log, year });
+  if (!rows.length) {
+    const why = sources.map((s) => `${s.archive}: ${s.error || 'no captures'}`).join('; ');
+    throw new Error(`No archive has successful captures under ${scope.cdxUrl} (${why})`);
+  }
   const index = buildIndex(rows);
   const target = targetTimestamp(rows, year);
   log(`  target moment: ${tsToDate(target)}${year ? '' : ' (busiest year in the archive)'}; ${index.size} distinct URLs archived`);
@@ -80,24 +87,49 @@ export async function resurrect({
     if (from) r.referrers.add(from);
   };
 
+  // Circuit breaker: an archive that keeps timing out or erroring is skipped,
+  // instead of every remaining URL waiting through the fetcher's retries.
+  const failures = new Map();
+  const down = (a) => (failures.get(a.name) || 0) >= DOWN_AFTER;
+  for (const s of sources) if (s.error) failures.set(s.archive, DOWN_AFTER);
+  const empty = new Set(sources.filter((s) => !s.error && !s.captures).map((s) => s.archive));
+  async function getFrom(a, u) {
+    const got = await fetcher.get(u);
+    if (got.status === 0 || got.status >= 500) {
+      const n = (failures.get(a.name) || 0) + 1;
+      failures.set(a.name, n);
+      if (n === DOWN_AFTER) log(`  ${a.name} keeps failing (${got.status || got.error}); skipping it from here on`);
+    } else failures.set(a.name, 0);
+    return got;
+  }
+  const usable = (got, r) => got.status === 200 && got.body.length && plausible(got, r.url);
+
   async function recover(r) {
-    const ranked = rankCaptures(index.get(r.key), target).slice(0, MAX_TRIES);
-    for (let i = 0; i < ranked.length; i++) {
-      const c = ranked[i];
-      const got = await fetcher.get(waybackRawUrl(c.ts, c.original));
-      if (got.status === 200 && got.body.length && plausible(got, r.url)) {
-        const w = unwrapWayback(new URL(got.finalUrl).pathname);
-        return { got, ts: w?.ts?.padEnd(14, '0') || c.ts, original: c.original, via: i === 0 ? 'best' : 'neighbour' };
+    // closest capture first, across all archives; at most MAX_TRIES per archive
+    const tries = new Map();
+    let first = true;
+    for (const c of rankCaptures(index.get(r.key), target)) {
+      const a = byName.get(c.archive) || ARCHIVES.wayback;
+      if (down(a) || (tries.get(a.name) || 0) >= MAX_TRIES) { first = false; continue; }
+      tries.set(a.name, (tries.get(a.name) || 0) + 1);
+      const got = await getFrom(a, rawUrl(a, c.ts, c.original));
+      if (usable(got, r)) {
+        const w = unwrapReplay(a, got.finalUrl);
+        return { got, ts: w?.ts || c.ts, original: c.original, via: first ? 'best' : 'neighbour', archive: a.name };
       }
+      first = false;
     }
     // Not in our index (other host, or a URL variant the crawler saw): let
-    // the Wayback Machine redirect us to its nearest capture of it.
-    const got = await fetcher.get(waybackRawUrl(target, r.url.href));
-    if (got.status === 200 && got.body.length && plausible(got, r.url)) {
-      const w = unwrapWayback(new URL(got.finalUrl).pathname);
-      const ts = w?.ts?.padEnd(14, '0') || target;
+    // each archive redirect us to its nearest capture of it.
+    for (const a of archives) {
+      // an archive with no captures anywhere under the site won't have this page either
+      if (down(a) || (r.own && empty.has(a.name))) continue;
+      const got = await getFrom(a, rawUrl(a, target, r.url.href));
+      if (!usable(got, r)) continue;
+      const w = unwrapReplay(a, got.finalUrl);
+      const ts = w?.ts || target;
       // "nearest" can be decades away (a later owner, a parked domain): too far is lost, not recovered
-      if (days(ts, target) <= MAX_NEAREST_DAYS) return { got, ts, original: w?.url || r.url.href, via: 'nearest' };
+      if (days(ts, target) <= MAX_NEAREST_DAYS) return { got, ts, original: w?.url || r.url.href, via: 'nearest', archive: a.name };
     }
     return null;
   }
@@ -127,14 +159,15 @@ export async function resurrect({
       log(`  lost   ${r.url.href}`);
       continue;
     }
-    const { got, ts, original, via } = found;
+    const { got, ts, original, via, archive } = found;
     const { isHtml, isCss } = classify(got, r.url);
     Object.assign(r, {
-      status: 'ok', ts, original, via, body: got.body, contentType: got.contentType,
+      status: 'ok', ts, original, via, archive, body: got.body, contentType: got.contentType,
       isHtml: isHtml && r.want === 'page', isCss,
     });
     if (r.isHtml) pageCount++; else assetCount++;
-    const mark = via === 'best' ? '' : ` [${via}, ${days(ts, target)}d from target]`;
+    const mark = (via === 'best' ? '' : ` [${via}, ${days(ts, target)}d from target]`) +
+      (archive !== archives[0].name ? ` (${archive})` : '');
     log(`  ${r.isHtml ? 'page ' : 'asset'}  ${tsToDate(ts)}  ${r.url.href}${mark}`);
 
     if (r.isHtml) {
@@ -169,7 +202,7 @@ export async function resurrect({
     if (r.status !== 'ok') continue;
     if (r.isHtml) {
       let html = transformHtml(r.body.toString('latin1'), r.original, (l) => linkFor(r, l));
-      html = decorate(html, r, noindex);
+      html = decorate(html, r, noindex, byName.get(r.archive) || ARCHIVES.wayback);
       await write(r.local, Buffer.from(html, 'latin1'));
     } else if (r.isCss) {
       const css = transformCss(r.body.toString('latin1'), r.original, (l) => linkFor(r, l));
@@ -181,14 +214,15 @@ export async function resurrect({
 
   function linkFor(from, l) {
     const t = res.get(urlKey(l.url));
+    const a = byName.get(from.archive) || archives[0];
     if (t?.status === 'ok') return relativeHref(from.local, t.local);
     if (l.kind === 'nav' && !looksLikeAsset(l.url) || t?.want === 'page') {
       if (t?.status === 'lost') return `${relativeHref(from.local, '_resurrect/lost.html')}#${l.url.href}`;
       // out of scope, or beyond --max-pages: send the reader to the archive's copy
-      return waybackViewUrl(from.ts, l.url.href);
+      return viewUrl(a, from.ts, l.url.href);
     }
     // never leave a link as it was: relative to the dead site, it would break here
-    return waybackViewUrl(`${from.ts}im_`, l.url.href);
+    return viewUrl(a, `${from.ts}im_`, l.url.href);
   }
 
   const asked = res.get(urlKey(new URL(scope.start)));
@@ -199,19 +233,19 @@ export async function resurrect({
   if (noindex) await write('robots.txt', 'User-agent: *\nDisallow: /\n');
   await write('_resurrect/lost.html', lostPage());
 
-  const report = summarize({ url, scope, target, year, res, externalNav, truncated, rows: rows.length, indexSize: index.size });
+  const report = summarize({ url, scope, target, year, res, externalNav, truncated, rows: rows.length, indexSize: index.size, sources, archives });
   await write('_resurrect/report.json', `${JSON.stringify(report, null, 2)}\n`);
   await write('_resurrect/REPORT.md', renderReport(report));
   return report;
 }
 
-function decorate(html, r, noindex) {
+function decorate(html, r, noindex, archive) {
   const when = tsToDate(r.ts);
-  const view = waybackViewUrl(r.ts, r.original);
+  const view = viewUrl(archive, r.ts, r.original);
   const footer =
     `\n<div data-resurrect-footer style="all:initial;display:block;clear:both;margin:24px 0 0;padding:8px 12px;` +
     `border-top:1px dashed #999;background:#fafafa;color:#555;font:12px/1.5 Verdana,Arial,sans-serif;text-align:center">` +
-    `Resurrected from the <a style="color:#36c" href="${asciiHtml(view)}">Internet Archive's Wayback Machine</a>` +
+    `Resurrected from ${archive === ARCHIVES.wayback ? 'the ' : ''}<a style="color:#36c" href="${asciiHtml(view)}">${asciiHtml(archive.label)}</a>` +
     ` &middot; captured ${when} &middot; originally at ${asciiHtml(r.original.replace(/:80\//, '/'))}` +
     ` &middot; rebuilt by <a style="color:#36c" href="https://github.com/dadwritestech/resurrect">resurrect</a>` +
     `</div>\n`;
@@ -222,7 +256,7 @@ function decorate(html, r, noindex) {
   return out;
 }
 
-function summarize({ url, scope, target, year, res, externalNav, truncated, rows, indexSize }) {
+function summarize({ url, scope, target, year, res, externalNav, truncated, rows, indexSize, sources, archives }) {
   const all = [...res.values()];
   const ok = all.filter((r) => r.status === 'ok');
   const item = (r) => ({
@@ -230,6 +264,7 @@ function summarize({ url, scope, target, year, res, externalNav, truncated, rows
     file: r.local,
     captured: r.ts && tsToDate(r.ts),
     via: r.via,
+    archive: r.archive,
     driftDays: r.ts ? days(r.ts, target) : null,
   });
   const lost = (r) => ({ url: r.url.href, kind: r.want, linkedFrom: [...r.referrers].slice(0, 5) });
@@ -240,7 +275,8 @@ function summarize({ url, scope, target, year, res, externalNav, truncated, rows
     target: tsToDate(target),
     targetFrom: year ? '--year' : 'busiest archived year',
     generatedAt: new Date().toISOString(),
-    index: { captures: rows, distinctUrls: indexSize, truncated },
+    index: { captures: rows, distinctUrls: indexSize, truncated, sources },
+    archives: archives.map((a) => ({ name: a.name, label: a.label, used: ok.filter((r) => r.archive === a.name).length })),
     capturesSpan: tss.length ? [tsToDate(tss[0]), tsToDate(tss.at(-1))] : null,
     pages: {
       recovered: ok.filter((r) => r.isHtml).map(item),

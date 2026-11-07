@@ -1,26 +1,27 @@
-// Wayback CDX index: which captures exist, and which one to use for each page.
+// CDX index: which captures exist (in which archive), and which one to use for each page.
 
+import { ARCHIVES, rawUrl, viewUrl } from './archives.js';
 import { urlKey } from './urls.js';
 
-const CDX = 'https://web.archive.org/cdx/search/cdx';
 const FIELDS = 'urlkey,timestamp,original,mimetype,statuscode,digest,length';
 
-export function cdxQueryUrl(scope, { pageSize = 5000, resumeKey, year } = {}) {
+export function cdxQueryUrl(scope, { pageSize = 5000, resumeKey, year, archive = ARCHIVES.wayback } = {}) {
+  const wb = archive.flavour === 'wayback';
   const q = new URLSearchParams({
     url: scope.cdxUrl,
     matchType: 'prefix',
     output: 'json',
-    fl: FIELDS,
-    filter: 'statuscode:200',
+    ...(wb ? { fl: FIELDS } : {}),
+    filter: wb ? 'statuscode:200' : 'status:200',
     collapse: 'digest', // drop back-to-back identical captures of the same URL
     limit: String(pageSize),
-    showResumeKey: 'true',
+    ...(wb ? { showResumeKey: 'true' } : {}),
   });
   // With a target year, only look 5 years either side: big sites answer much
   // faster, and a capture from further away is not "the site in that year".
   if (year) { q.set('from', String(year - 5)); q.set('to', String(year + 5)); }
   if (resumeKey) q.set('resumeKey', resumeKey);
-  return `${CDX}?${q}`;
+  return `${archive.cdx}?${q}`;
 }
 
 /**
@@ -28,6 +29,7 @@ export function cdxQueryUrl(scope, { pageSize = 5000, resumeKey, year } = {}) {
  * With showResumeKey the tail looks like: ..., [], ["<resumeKey>"]
  */
 export function parseCdx(json) {
+  if (typeof json === 'string' && /^\s*\{/.test(json)) return parseCdxNdjson(json);
   const data = typeof json === 'string' ? JSON.parse(json || '[]') : json;
   if (!Array.isArray(data) || data.length === 0) return { rows: [], resumeKey: null };
   const [header, ...rest] = data;
@@ -52,19 +54,69 @@ export function parseCdx(json) {
   return { rows, resumeKey };
 }
 
-/** Fetch the full capture list for a scope, following resume keys. */
-export async function fetchCdx(scope, fetcher, { maxRows = 50000, year, log = () => {} } = {}) {
+/**
+ * pywb answers output=json with one JSON object per line and its own field
+ * names (url/mime/status). Archives built from old ARC files often record
+ * length 0 for real captures, so 0 means "unknown" here.
+ */
+export function parseCdxNdjson(text) {
+  const rows = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    if (!o.timestamp || !(o.url || o.original)) continue;
+    const len = /^\d+$/.test(o.length ?? '') ? Number(o.length) : null;
+    rows.push({
+      ts: o.timestamp,
+      original: o.url || o.original,
+      mime: o.mime || o.mimetype,
+      status: String(o.status ?? o.statuscode ?? ''),
+      digest: o.digest,
+      length: len || null,
+    });
+  }
+  return { rows, resumeKey: null };
+}
+
+/** Fetch the full capture list for a scope from one archive, following resume keys. */
+export async function fetchCdx(scope, fetcher, { maxRows = 50000, year, log = () => {}, archive = ARCHIVES.wayback } = {}) {
   const all = [];
   let resumeKey = null;
+  // pywb has no resume keys: ask for everything up to the cap in one go
+  const pageSize = archive.flavour === 'wayback' ? 5000 : maxRows;
   do {
-    const res = await fetcher.get(cdxQueryUrl(scope, { resumeKey, year }));
-    if (res.status !== 200) throw new Error(`CDX query failed: HTTP ${res.status}`);
+    const res = await fetcher.get(cdxQueryUrl(scope, { resumeKey, year, archive, pageSize }));
+    if (res.status !== 200) throw new Error(`${archive.label} index query failed: HTTP ${res.status || res.error}`);
     const page = parseCdx(res.body.toString('utf8'));
+    for (const r of page.rows) r.archive = archive.name;
     all.push(...page.rows);
     resumeKey = page.resumeKey;
-    log(`  index: ${all.length} captures${resumeKey ? ' (more…)' : ''}`);
+    log(`  ${archive.name} index: ${all.length} captures${resumeKey ? ' (more…)' : ''}`);
   } while (resumeKey && all.length < maxRows);
-  return { rows: all, truncated: Boolean(resumeKey) };
+  return { rows: all, truncated: Boolean(resumeKey) || (archive.flavour !== 'wayback' && all.length >= maxRows) };
+}
+
+/**
+ * Ask every archive. One being down, blocked or empty is not fatal: that is
+ * the point of having more than one. Returns rows tagged with their archive.
+ */
+export async function fetchAllCdx(scope, fetcher, archives, { year, log = () => {}, maxRows } = {}) {
+  const rows = [];
+  const sources = [];
+  let truncated = false;
+  for (const archive of archives) {
+    try {
+      const r = await fetchCdx(scope, fetcher, { year, log, archive, maxRows });
+      rows.push(...r.rows);
+      truncated ||= r.truncated;
+      sources.push({ archive: archive.name, captures: r.rows.length });
+    } catch (err) {
+      log(`  ${archive.name}: unavailable (${err.message}); carrying on without it`);
+      sources.push({ archive: archive.name, captures: 0, error: err.message });
+    }
+  }
+  return { rows, truncated, sources };
 }
 
 /** Group captures by canonical URL key. */
@@ -126,10 +178,5 @@ export function rankCaptures(captures, target) {
     .sort((a, b) => Math.abs(tsToMs(a.ts) - t) - Math.abs(tsToMs(b.ts) - t) || a.ts.localeCompare(b.ts));
 }
 
-export function waybackRawUrl(ts, original) {
-  return `https://web.archive.org/web/${ts}id_/${original}`;
-}
-
-export function waybackViewUrl(ts, original) {
-  return `https://web.archive.org/web/${ts}/${original}`;
-}
+export const waybackRawUrl = (ts, original) => rawUrl(ARCHIVES.wayback, ts, original);
+export const waybackViewUrl = (ts, original) => viewUrl(ARCHIVES.wayback, ts, original);

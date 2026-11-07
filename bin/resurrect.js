@@ -2,6 +2,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
+import { pickArchives } from '../src/archives.js';
 import { resurrect } from '../src/build.js';
 import { createFetcher } from '../src/fetcher.js';
 import { makeScope, withScheme } from '../src/urls.js';
@@ -17,7 +18,11 @@ Options:
   --out <dir>          output folder (default: ./resurrected/<host>)
   --max-pages <n>      stop after n pages (default 300)
   --max-assets <n>     stop after n images/styles/files (default 3000)
-  --delay <ms>         gap between requests to archive.org (default 1000)
+  --archive <name|url> where to look; repeat for several, closest capture wins
+                       (default: wayback + arquivo). Names: wayback, arquivo.
+                       A URL is any pywb collection, e.g. your own:
+                       --archive http://localhost:8080/my-warcs/
+  --delay <ms>         gap between requests to an archive (default 1000)
   --cache <dir>        download cache (default ~/.cache/resurrect)
   --no-external        don't fetch images/CSS hosted on other domains
   --allow-indexing     omit the noindex meta tag and robots.txt (only for
@@ -25,7 +30,7 @@ Options:
   -h, --help
 
 For your own sites and personal archival use. Every page gets a footer
-crediting the Internet Archive and the capture date.`;
+crediting the archive it came from and the capture date.`;
 
 let args;
 try {
@@ -37,6 +42,7 @@ try {
       'max-pages': { type: 'string' },
       'max-assets': { type: 'string' },
       delay: { type: 'string' },
+      archive: { type: 'string', multiple: true },
       cache: { type: 'string' },
       'no-external': { type: 'boolean' },
       'allow-indexing': { type: 'boolean' },
@@ -54,6 +60,14 @@ if (v.help || positionals.length !== 1) {
 }
 if (v.year && !/^(199\d|20\d\d)$/.test(v.year)) {
   console.error('--year must be a four-digit year between 1990 and 2099');
+  process.exit(2);
+}
+
+let archives;
+try {
+  archives = pickArchives(v.archive?.length ? v.archive.flatMap((a) => a.split(',')) : undefined);
+} catch (err) {
+  console.error(`--archive: ${err.message}`);
   process.exit(2);
 }
 
@@ -78,13 +92,15 @@ try {
     maxAssets: v['max-assets'] ? Number(v['max-assets']) : undefined,
     external: !v['no-external'],
     noindex: !v['allow-indexing'],
+    archives,
   });
   const s = fetcher.stats;
   console.log(`
 Resurrected ${r.scope} as of ${r.target}
   pages:  ${r.pages.recovered.length} recovered, ${r.pages.lost.length} lost
   assets: ${r.assets.recovered.length} recovered, ${r.assets.lost.length} lost
-  ${s.network} requests to archive.org, ${s.cached} from cache, ${((Date.now() - t0) / 1000).toFixed(0)}s
+  ${r.archives.filter((a) => a.used).map((a) => `${a.used} from ${a.name}`).join(', ')}
+  ${s.network} requests to archives, ${s.cached} from cache, ${((Date.now() - t0) / 1000).toFixed(0)}s
   -> ${join(out, 'index.html')}
   -> ${join(out, '_resurrect', 'REPORT.md')}`);
 } catch (err) {

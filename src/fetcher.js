@@ -1,4 +1,4 @@
-// Polite HTTP client for the Wayback Machine: one request at a time, a fixed
+// Polite HTTP client for web archives: one request at a time, a fixed
 // gap between requests, backoff on 429/5xx, a descriptive User-Agent, and a
 // disk cache so a second run (or a crash halfway) never re-downloads anything.
 
@@ -62,7 +62,8 @@ export function createFetcher({
   }
 
   /**
-   * GET a URL. Redirects are followed only while they stay on archive.org,
+   * GET a URL. Redirects are followed only while they stay on archive.org or on
+   * the archive host we asked,
    * so a stray Location header can never send us to the live (dead, or
    * re-registered) site. Returns {status, contentType, finalUrl, body}.
    * 404s and other final errors are cached too: missing stays missing.
@@ -97,7 +98,8 @@ export function createFetcher({
       if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
         const next = new URL(res.headers.get('location'), current).href;
         await res.arrayBuffer().catch(() => {});
-        if (!ARCHIVE_HOST.test(next)) {
+        // stay inside the archive we asked (Arquivo.pt and pywb redirect within their own host)
+        if (!ARCHIVE_HOST.test(next) && new URL(next).origin !== new URL(url).origin) {
           const out = { status: res.status, contentType: '', finalUrl: next, body: Buffer.alloc(0), offsite: true };
           await toCache(url, out);
           return out;
