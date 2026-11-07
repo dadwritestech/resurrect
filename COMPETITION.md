@@ -36,7 +36,7 @@ the Wayback Machine. Nostalgic and adjacent, but it gives you a proxy, not a sit
 
 Downloaders give you **files**. resurrect gives you **the website back, working**:
 
-1. **One argument.** `npx resurrect myoldblog.com`. Host equivalence, the date window and the
+1. **One argument.** `npx github:dadwritestech/resurrect myoldblog.com`. Host equivalence, the date window and the
    target moment are all inferred: the default is the busiest archived year, counted by
    *distinct URLs* so that parked-domain re-crawls are ignored.
 2. **Time travel.** `--year 2003` rebuilds the site as it was that year, choosing the closest
